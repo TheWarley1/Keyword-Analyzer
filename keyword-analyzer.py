@@ -1,3 +1,4 @@
+# Part 1: Core Functions and Enhanced Keyword Extraction
 import streamlit as st
 import pandas as pd
 import re
@@ -10,199 +11,176 @@ import zipfile
 import tempfile
 import os
 
-def extract_keywords(text, keywords, case_sensitive=False, whole_words=True):
-    """Extract keyword counts and positions from text."""
+def extract_keywords_prediction_market(text, keywords, case_sensitive=False, include_plurals=True, include_compounds=True):
+    """
+    Extract keyword counts with prediction market rules:
+    - Pluralization/possessive forms count
+    - Compound words count
+    - Other forms do NOT count
+    """
     if not text.strip() or not keywords:
         return []
     
-    # Process keywords
     keyword_list = [k.strip() for k in keywords.split(',') if k.strip()]
-    search_text = text if case_sensitive else text.lower()
-    
     results = []
     
     for keyword in keyword_list:
         search_term = keyword if case_sensitive else keyword.lower()
+        search_text = text if case_sensitive else text.lower()
+        
         matches = []
-        count = 0
+        patterns = []
         
-        if whole_words:
-            # Use regex for whole word matching
-            pattern = r'\b' + re.escape(search_term) + r'\b'
-            flags = 0 if case_sensitive else re.IGNORECASE
+        # Base pattern for exact word
+        base_pattern = r'\b' + re.escape(search_term) + r'\b'
+        patterns.append(('exact', base_pattern))
+        
+        if include_plurals:
+            # Plural patterns
+            plural_pattern = r'\b' + re.escape(search_term) + r'(?:s|es|ies)\b'
+            patterns.append(('plural', plural_pattern))
             
-            for match in re.finditer(pattern, text, flags):
-                matches.append({
-                    'start': match.start(),
-                    'end': match.end(),
-                    'text': match.group()
-                })
-                count += 1
-        else:
-            # Simple substring search
-            start = 0
-            while True:
-                pos = search_text.find(search_term, start)
-                if pos == -1:
-                    break
-                matches.append({
-                    'start': pos,
-                    'end': pos + len(search_term),
-                    'text': text[pos:pos + len(search_term)]
-                })
-                count += 1
-                start = pos + 1
+            # Possessive patterns
+            possessive_pattern = r'\b' + re.escape(search_term) + r"(?:'s|')\b"
+            patterns.append(('possessive', possessive_pattern))
         
-        # Calculate percentage and density
+        if include_compounds:
+            # Compound word patterns (term as part of larger word)
+            compound_start = r'\b' + re.escape(search_term) + r'[a-zA-Z]+'
+            compound_end = r'[a-zA-Z]+' + re.escape(search_term) + r'\b'
+            patterns.append(('compound_start', compound_start))
+            patterns.append(('compound_end', compound_end))
+        
+        all_matches = []
+        flags = 0 if case_sensitive else re.IGNORECASE
+        
+        for pattern_type, pattern in patterns:
+            for match in re.finditer(pattern, text, flags):
+                # Check for overlaps and avoid duplicates
+                overlap = False
+                for existing in all_matches:
+                    if (match.start() < existing['end'] and match.end() > existing['start']):
+                        overlap = True
+                        break
+                
+                if not overlap:
+                    all_matches.append({
+                        'start': match.start(),
+                        'end': match.end(),
+                        'text': match.group(),
+                        'type': pattern_type,
+                        'keyword': keyword
+                    })
+        
+        # Sort by position
+        all_matches.sort(key=lambda x: x['start'])
+        
+        count = len(all_matches)
         percentage = (count * len(search_term) / len(text)) * 100 if text else 0
         density_per_1000 = (count / len(text.split())) * 1000 if text.split() else 0
+        
+        # Categorize matches by type
+        match_types = {
+            'exact': [m for m in all_matches if m['type'] == 'exact'],
+            'plural': [m for m in all_matches if m['type'] == 'plural'],
+            'possessive': [m for m in all_matches if m['type'] == 'possessive'],
+            'compound': [m for m in all_matches if m['type'] in ['compound_start', 'compound_end']]
+        }
         
         results.append({
             'keyword': keyword,
             'count': count,
-            'matches': matches,
+            'matches': all_matches,
+            'match_types': match_types,
             'percentage': round(percentage, 2),
-            'density': round(density_per_1000, 2)
+            'density': round(density_per_1000, 2),
+            'market_resolution': 'YES' if count > 0 else 'NO'
         })
     
-    # Sort by count (descending)
     return sorted(results, key=lambda x: x['count'], reverse=True)
 
-def process_multiple_transcripts(transcripts_dict, keywords, case_sensitive=False, whole_words=True):
-    """Process multiple transcripts and return combined results."""
+def validate_compound_word(word, base_term):
+    """
+    Validate if a word is a true compound containing the base term.
+    This helps distinguish real compounds from coincidental letter sequences.
+    """
+    # Simple validation - could be enhanced with dictionary lookup
+    word_lower = word.lower()
+    base_lower = base_term.lower()
+    
+    if base_lower not in word_lower:
+        return False
+    
+    # Check if it's at word boundaries within the compound
+    # This is a simplified check - more sophisticated logic could be added
+    return len(word) > len(base_term) and word != base_term
+
+def process_multiple_transcripts_market(transcripts_dict, keywords, case_sensitive=False, include_plurals=True, include_compounds=True):
+    """Process multiple transcripts with prediction market rules."""
     all_results = {}
     
     for name, text in transcripts_dict.items():
-        results = extract_keywords(text, keywords, case_sensitive, whole_words)
+        results = extract_keywords_prediction_market(text, keywords, case_sensitive, include_plurals, include_compounds)
         all_results[name] = {
             'results': results,
             'word_count': len(text.split()) if text else 0,
             'char_count': len(text) if text else 0,
-            'total_keywords': sum(r['count'] for r in results)
+            'total_keywords': sum(r['count'] for r in results),
+            'market_resolution': any(r['market_resolution'] == 'YES' for r in results)
         }
     
     return all_results
 
-def create_comparison_dataframe(all_results, keywords):
-    """Create a dataframe for comparison across transcripts."""
-    keyword_list = [k.strip() for k in keywords.split(',') if k.strip()]
-    
-    comparison_data = []
+def create_market_resolution_summary(all_results):
+    """Create a summary of market resolution outcomes."""
+    summary_data = []
     
     for transcript_name, data in all_results.items():
-        row = {'Transcript': transcript_name}
+        resolution = 'YES' if data['market_resolution'] else 'NO'
         
-        # Add basic stats
-        row['Word Count'] = data['word_count']
-        row['Total Keywords'] = data['total_keywords']
-        row['Keyword Density'] = round((data['total_keywords'] / data['word_count']) * 1000, 2) if data['word_count'] > 0 else 0
+        # Count different match types
+        match_type_counts = {'exact': 0, 'plural': 0, 'possessive': 0, 'compound': 0}
         
-        # Add individual keyword counts
-        results_dict = {r['keyword']: r['count'] for r in data['results']}
-        for keyword in keyword_list:
-            row[f"{keyword}_count"] = results_dict.get(keyword, 0)
-            row[f"{keyword}_density"] = round((results_dict.get(keyword, 0) / data['word_count']) * 1000, 2) if data['word_count'] > 0 else 0
+        for result in data['results']:
+            for match_type, matches in result['match_types'].items():
+                match_type_counts[match_type] += len(matches)
         
-        comparison_data.append(row)
+        summary_data.append({
+            'Transcript': transcript_name,
+            'Market Resolution': resolution,
+            'Total Matches': data['total_keywords'],
+            'Exact Matches': match_type_counts['exact'],
+            'Plural/Possessive': match_type_counts['plural'] + match_type_counts['possessive'],
+            'Compound Words': match_type_counts['compound'],
+            'Word Count': data['word_count']
+        })
     
-    return pd.DataFrame(comparison_data)
+    return pd.DataFrame(summary_data)
 
-def create_comparison_charts(comparison_df, keywords):
-    """Create comparison visualizations."""
-    charts = {}
-    
-    if comparison_df.empty:
-        return charts
-    
-    keyword_list = [k.strip() for k in keywords.split(',') if k.strip()]
-    
-    # 1. Grouped bar chart for keyword counts
-    count_cols = [f"{k}_count" for k in keyword_list]
-    if all(col in comparison_df.columns for col in count_cols):
-        fig_counts = go.Figure()
-        
-        for keyword in keyword_list:
-            fig_counts.add_trace(go.Bar(
-                name=keyword,
-                x=comparison_df['Transcript'],
-                y=comparison_df[f"{keyword}_count"],
-                text=comparison_df[f"{keyword}_count"],
-                textposition='auto',
-            ))
-        
-        fig_counts.update_layout(
-            title='Keyword Count Comparison Across Transcripts',
-            xaxis_title='Transcripts',
-            yaxis_title='Count',
-            barmode='group',
-            height=500
-        )
-        charts['counts'] = fig_counts
-    
-    # 2. Heatmap for keyword densities
-    density_cols = [f"{k}_density" for k in keyword_list]
-    if all(col in comparison_df.columns for col in density_cols):
-        density_data = comparison_df[['Transcript'] + density_cols].set_index('Transcript')
-        density_data.columns = keyword_list
-        
-        fig_heatmap = px.imshow(
-            density_data.T,
-            labels=dict(x="Transcripts", y="Keywords", color="Density (per 1000 words)"),
-            title="Keyword Density Heatmap",
-            aspect="auto",
-            color_continuous_scale='viridis'
-        )
-        fig_heatmap.update_layout(height=400)
-        charts['heatmap'] = fig_heatmap
-    
-    # 3. Total keyword density comparison
-    if 'Keyword Density' in comparison_df.columns:
-        fig_density = px.bar(
-            comparison_df,
-            x='Transcript',
-            y='Keyword Density',
-            title='Overall Keyword Density Comparison',
-            labels={'Keyword Density': 'Keywords per 1000 words'},
-            text='Keyword Density'
-        )
-        fig_density.update_traces(textposition='outside')
-        fig_density.update_layout(height=400)
-        charts['overall_density'] = fig_density
-    
-    # 4. Word count comparison
-    if 'Word Count' in comparison_df.columns:
-        fig_words = px.bar(
-            comparison_df,
-            x='Transcript',
-            y='Word Count',
-            title='Transcript Length Comparison',
-            text='Word Count'
-        )
-        fig_words.update_traces(textposition='outside')
-        fig_words.update_layout(height=400)
-        charts['word_count'] = fig_words
-    
-    return charts
-
-def highlight_text(text, results):
-    """Add HTML highlighting to text based on keyword matches."""
+def highlight_text_with_types(text, results):
+    """Enhanced highlighting that shows match types with different styles."""
     if not text or not results:
         return text
     
-    # Collect all matches with colors
     all_matches = []
-    colors = ['#FFE4E1', '#E1F5FE', '#E8F5E8', '#FFF3E0', '#F3E5F5', 
-              '#E0F2F1', '#FFF8E1', '#F1F8E9', '#FCE4EC', '#E3F2FD']
+    type_colors = {
+        'exact': '#FFB6C1',      # Light pink
+        'plural': '#98FB98',     # Pale green  
+        'possessive': '#87CEEB', # Sky blue
+        'compound_start': '#DDA0DD', # Plum
+        'compound_end': '#F0E68C'    # Khaki
+    }
     
-    for i, result in enumerate(results):
-        color = colors[i % len(colors)]
+    for result in results:
         for match in result['matches']:
+            color = type_colors.get(match['type'], '#FFFFE0')  # Default light yellow
             all_matches.append({
                 'start': match['start'],
                 'end': match['end'],
                 'text': match['text'],
                 'color': color,
-                'keyword': result['keyword']
+                'keyword': result['keyword'],
+                'match_type': match['type']
             })
     
     # Sort by position (descending) to avoid position shifts
@@ -212,15 +190,15 @@ def highlight_text(text, results):
     highlighted = text
     for match in all_matches:
         before = highlighted[:match['start']]
-        after = highlighted[match['end']:]
-        highlighted_text = f'<mark style="background-color: {match["color"]}; padding: 2px 4px; border-radius: 3px; font-weight: 500;" title="{match["keyword"]}">{match["text"]}</mark>'
+        after = highlighted[match['end']]
+        
+        type_label = match['match_type'].replace('_', ' ').title()
+        tooltip = f"{match['keyword']} ({type_label})"
+        
+        highlighted_text = f'<mark style="background-color: {match["color"]}; padding: 2px 4px; border-radius: 3px; font-weight: 500; border: 1px solid #666;" title="{tooltip}">{match["text"]}</mark>'
         highlighted = before + highlighted_text + after
     
     return highlighted
-
-def export_comparison_to_csv(comparison_df):
-    """Export comparison results to CSV."""
-    return comparison_df.to_csv(index=False)
 
 def load_transcripts_from_files(uploaded_files):
     """Load transcripts from multiple uploaded files."""
@@ -247,48 +225,286 @@ def load_transcripts_from_files(uploaded_files):
     
     return transcripts
 
-# Streamlit App
+# Part 2: Visualization and Comparison Functions
+
+def create_market_comparison_dataframe(all_results, keywords):
+    """Create enhanced dataframe for prediction market comparison."""
+    keyword_list = [k.strip() for k in keywords.split(',') if k.strip()]
+    
+    comparison_data = []
+    
+    for transcript_name, data in all_results.items():
+        row = {'Transcript': transcript_name}
+        
+        # Add basic stats
+        row['Word Count'] = data['word_count']
+        row['Total Keywords'] = data['total_keywords']
+        row['Market Resolution'] = 'YES' if data['market_resolution'] else 'NO'
+        row['Keyword Density'] = round((data['total_keywords'] / data['word_count']) * 1000, 2) if data['word_count'] > 0 else 0
+        
+        # Add individual keyword counts and resolution
+        results_dict = {r['keyword']: r for r in data['results']}
+        
+        for keyword in keyword_list:
+            if keyword in results_dict:
+                result = results_dict[keyword]
+                row[f"{keyword}_total"] = result['count']
+                row[f"{keyword}_resolution"] = result['market_resolution']
+                row[f"{keyword}_density"] = result['density']
+                
+                # Breakdown by match type
+                row[f"{keyword}_exact"] = len(result['match_types']['exact'])
+                row[f"{keyword}_plural"] = len(result['match_types']['plural'])
+                row[f"{keyword}_possessive"] = len(result['match_types']['possessive'])
+                row[f"{keyword}_compound"] = len(result['match_types']['compound'])
+            else:
+                row[f"{keyword}_total"] = 0
+                row[f"{keyword}_resolution"] = 'NO'
+                row[f"{keyword}_density"] = 0
+                row[f"{keyword}_exact"] = 0
+                row[f"{keyword}_plural"] = 0
+                row[f"{keyword}_possessive"] = 0
+                row[f"{keyword}_compound"] = 0
+        
+        comparison_data.append(row)
+    
+    return pd.DataFrame(comparison_data)
+
+def create_market_resolution_chart(comparison_df, keywords):
+    """Create market resolution visualization."""
+    keyword_list = [k.strip() for k in keywords.split(',') if k.strip()]
+    
+    # Prepare data for resolution chart
+    resolution_data = []
+    
+    for _, row in comparison_df.iterrows():
+        for keyword in keyword_list:
+            resolution_col = f"{keyword}_resolution"
+            if resolution_col in comparison_df.columns:
+                resolution_data.append({
+                    'Transcript': row['Transcript'],
+                    'Keyword': keyword,
+                    'Resolution': row[resolution_col],
+                    'Count': row[f"{keyword}_total"] if f"{keyword}_total" in comparison_df.columns else 0
+                })
+    
+    if not resolution_data:
+        return None
+    
+    resolution_df = pd.DataFrame(resolution_data)
+    
+    # Create heatmap showing YES/NO resolutions
+    pivot_df = resolution_df.pivot(index='Keyword', columns='Transcript', values='Resolution')
+    
+    # Convert YES/NO to 1/0 for heatmap
+    numeric_df = pivot_df.replace({'YES': 1, 'NO': 0})
+    
+    fig = px.imshow(
+        numeric_df,
+        labels=dict(x="Transcripts", y="Keywords", color="Market Resolution"),
+        title="Market Resolution Heatmap (YES=1, NO=0)",
+        aspect="auto",
+        color_continuous_scale=[[0, '#ff4444'], [1, '#44ff44']],  # Red for NO, Green for YES
+        text_auto=True
+    )
+    
+    # Add custom text annotations
+    for i, keyword in enumerate(numeric_df.index):
+        for j, transcript in enumerate(numeric_df.columns):
+            value = numeric_df.iloc[i, j]
+            text = 'YES' if value == 1 else 'NO'
+            fig.add_annotation(
+                x=j, y=i,
+                text=text,
+                showarrow=False,
+                font=dict(color='white', size=12, family='Arial Black')
+            )
+    
+    fig.update_layout(height=400)
+    return fig
+
+def create_match_type_breakdown_chart(comparison_df, keywords):
+    """Create stacked bar chart showing match type breakdown."""
+    keyword_list = [k.strip() for k in keywords.split(',') if k.strip()]
+    
+    chart_data = []
+    
+    for _, row in comparison_df.iterrows():
+        for keyword in keyword_list:
+            exact_col = f"{keyword}_exact"
+            plural_col = f"{keyword}_plural"
+            possessive_col = f"{keyword}_possessive"
+            compound_col = f"{keyword}_compound"
+            
+            if all(col in comparison_df.columns for col in [exact_col, plural_col, possessive_col, compound_col]):
+                chart_data.append({
+                    'Transcript': row['Transcript'],
+                    'Keyword': keyword,
+                    'Exact': row[exact_col],
+                    'Plural': row[plural_col],
+                    'Possessive': row[possessive_col],
+                    'Compound': row[compound_col]
+                })
+    
+    if not chart_data:
+        return None
+    
+    chart_df = pd.DataFrame(chart_data)
+    
+    # Create stacked bar chart
+    fig = go.Figure()
+    
+    colors = {
+        'Exact': '#FFB6C1',
+        'Plural': '#98FB98', 
+        'Possessive': '#87CEEB',
+        'Compound': '#DDA0DD'
+    }
+    
+    for match_type in ['Exact', 'Plural', 'Possessive', 'Compound']:
+        for keyword in keyword_list:
+            keyword_data = chart_df[chart_df['Keyword'] == keyword]
+            if not keyword_data.empty:
+                fig.add_trace(go.Bar(
+                    name=f"{keyword} - {match_type}",
+                    x=keyword_data['Transcript'],
+                    y=keyword_data[match_type],
+                    marker_color=colors[match_type],
+                    legendgroup=keyword,
+                    legendgrouptitle_text=keyword,
+                    showlegend=True
+                ))
+    
+    fig.update_layout(
+        title='Match Type Breakdown by Transcript and Keyword',
+        xaxis_title='Transcripts',
+        yaxis_title='Number of Matches',
+        barmode='stack',
+        height=500,
+        legend=dict(groupclick="toggleitem")
+    )
+    
+    return fig
+
+def create_resolution_summary_chart(all_results):
+    """Create overall resolution summary."""
+    summary_data = {
+        'Total Transcripts': len(all_results),
+        'Resolving YES': sum(1 for data in all_results.values() if data['market_resolution']),
+        'Resolving NO': sum(1 for data in all_results.values() if not data['market_resolution'])
+    }
+    
+    fig = go.Figure(data=[
+        go.Bar(
+            x=['Total Transcripts', 'Resolving YES', 'Resolving NO'],
+            y=[summary_data['Total Transcripts'], summary_data['Resolving YES'], summary_data['Resolving NO']],
+            marker_color=['#87CEEB', '#44ff44', '#ff4444'],
+            text=[summary_data['Total Transcripts'], summary_data['Resolving YES'], summary_data['Resolving NO']],
+            textposition='auto'
+        )
+    ])
+    
+    fig.update_layout(
+        title='Market Resolution Summary',
+        yaxis_title='Number of Transcripts',
+        height=300
+    )
+    
+    return fig
+
+def export_market_results(comparison_df, all_results):
+    """Export comprehensive market analysis results."""
+    
+    # Create summary sheet
+    summary_data = []
+    for transcript_name, data in all_results.items():
+        summary_data.append({
+            'Transcript': transcript_name,
+            'Market_Resolution': 'YES' if data['market_resolution'] else 'NO',
+            'Total_Keyword_Instances': data['total_keywords'],
+            'Word_Count': data['word_count'],
+            'Keyword_Density_per_1000': round((data['total_keywords'] / data['word_count']) * 1000, 2) if data['word_count'] > 0 else 0
+        })
+    
+    summary_df = pd.DataFrame(summary_data)
+    
+    # Combine with detailed comparison data
+    export_data = {
+        'Summary': summary_df.to_csv(index=False),
+        'Detailed_Analysis': comparison_df.to_csv(index=False)
+    }
+    
+    return export_data
+
+# Part 3: Main Streamlit Application for Prediction Market Analysis
+
+
 def main():
     st.set_page_config(
-        page_title="Multi-Transcript Keyword Analysis",
-        page_icon="📊",
+        page_title="Prediction Market Resolution Tool",
+        page_icon="🎯",
         layout="wide"
     )
     
-    # Header
-    st.title("📊 Multi-Transcript Keyword Analysis Tool")
-    st.markdown("Analyze and compare keyword frequencies across multiple transcripts")
+    # Header with market context
+    st.title("🎯 Prediction Market Resolution Tool")
+    st.markdown("**Analyze transcripts for term detection according to prediction market rules**")
+    
+    # Market Rules Display
+    with st.expander("📋 Market Resolution Rules", expanded=False):
+        st.markdown("""
+        ### Resolution Criteria:
+        - **YES**: If the listed term is mentioned by anyone during the event
+        - **NO**: If the term is not mentioned
+        
+        ### What Counts:
+        ✅ **Any usage regardless of context**  
+        ✅ **Pluralization/possessive forms** (e.g., "joy" → "joys", "joy's")  
+        ✅ **Compound words** (e.g., "joy" in "killjoy")  
+        ❌ **Other forms do NOT count** (e.g., "joyful" for "joy")
+        
+
+        """)
     
     # Sidebar for settings
-    st.sidebar.header("⚙️ Settings")
-    case_sensitive = st.sidebar.checkbox("Case sensitive", value=False)
-    whole_words = st.sidebar.checkbox("Whole words only", value=True)
+    st.sidebar.header("⚙️ Analysis Settings")
+    
+    # Prediction market specific settings
+    st.sidebar.subheader("🎯 Market Rules")
+    case_sensitive = st.sidebar.checkbox("Case sensitive matching", value=False, 
+                                       help="Whether to distinguish between 'Joy' and 'joy'")
+    include_plurals = st.sidebar.checkbox("Include plurals/possessive", value=True,
+                                        help="Include forms like 'joys', 'joy's'")
+    include_compounds = st.sidebar.checkbox("Include compound words", value=True,
+                                          help="Include words containing the term like 'killjoy'")
     
     # Analysis mode selection
     analysis_mode = st.sidebar.radio(
         "Analysis Mode",
-        ["Single Transcript", "Multiple Transcripts"],
-        help="Choose between single transcript analysis or batch comparison"
+        ["Single Event", "Multiple Events"],
+        help="Analyze one event or compare multiple events"
     )
     
     # Initialize session state
     if 'transcripts' not in st.session_state:
         st.session_state.transcripts = {}
-    if 'keywords' not in st.session_state:
-        st.session_state.keywords = ""
+    if 'market_terms' not in st.session_state:
+        st.session_state.market_terms = ""
     
     # Input section
-    st.header("📝 Input Data")
+    st.header("📝 Event Data")
     
-    if analysis_mode == "Single Transcript":
-        # Single transcript mode (original functionality)
+    if analysis_mode == "Single Event":
+        # Single event mode
         col1, col2 = st.columns([1, 1])
         
         with col1:
+            st.subheader("🎤 Event Transcript")
+            
             uploaded_file = st.file_uploader(
-                "Upload transcript file (optional)", 
+                "Upload event transcript", 
                 type=['txt', 'csv'],
-                help="Upload a text file or CSV with transcript content"
+                help="Upload transcript file from the event"
             )
             
             if uploaded_file:
@@ -300,30 +516,43 @@ def main():
             transcript_text = st.text_area(
                 "Or paste transcript text",
                 height=200,
-                placeholder="Paste your transcript here...",
+                placeholder="Paste the event transcript here...",
                 value=list(st.session_state.transcripts.values())[0] if st.session_state.transcripts else ""
             )
             
             if transcript_text:
-                st.session_state.transcripts = {"Manual Input": transcript_text}
+                st.session_state.transcripts = {"Event Transcript": transcript_text}
         
         with col2:
-            keywords = st.text_input(
-                "Keywords (comma-separated)",
-                placeholder="keyword1, keyword2, keyword3",
-                value=st.session_state.keywords
+            st.subheader("🎯 Market Terms")
+            
+            market_terms = st.text_input(
+                "Terms to analyze (comma-separated)",
+                placeholder="term1, term2, term3",
+                value=st.session_state.market_terms,
+                help="Enter the exact terms from your prediction markets"
             )
-            st.session_state.keywords = keywords
+            st.session_state.market_terms = market_terms
+            
+            # Show current settings summary
+            if st.session_state.market_terms:
+                st.info(f"""
+                **Analysis Settings:**
+                - Terms: {st.session_state.market_terms}
+                - Case sensitive: {case_sensitive}
+                - Include plurals: {include_plurals}
+                - Include compounds: {include_compounds}
+                """)
     
     else:
-        # Multiple transcripts mode
-        st.subheader("📁 Upload Multiple Transcripts")
+        # Multiple events mode
+        st.subheader("📁 Upload Multiple Event Transcripts")
         
         uploaded_files = st.file_uploader(
-            "Upload transcript files",
+            "Upload event transcript files",
             type=['txt', 'csv'],
             accept_multiple_files=True,
-            help="Upload multiple text files or CSVs for comparison"
+            help="Upload multiple transcript files for comparison"
         )
         
         if uploaded_files:
@@ -331,220 +560,267 @@ def main():
             st.session_state.transcripts = transcripts
             
             if transcripts:
-                st.success(f"Loaded {len(transcripts)} transcript(s)")
-                with st.expander("Preview loaded transcripts"):
+                st.success(f"Loaded {len(transcripts)} event transcript(s)")
+                with st.expander("📋 Preview loaded events"):
                     for name, content in transcripts.items():
-                        st.text(f"{name}: {len(content)} characters, {len(content.split())} words")
+                        st.text(f"**{name}:** {len(content)} characters, {len(content.split())} words")
         
-        # Manual input option for multiple transcripts
-        st.subheader("✏️ Or Add Transcripts Manually")
+        # Manual input for multiple events
+        st.subheader("✏️ Add Events Manually")
         
         col1, col2 = st.columns([2, 1])
         with col1:
-            transcript_name = st.text_input("Transcript Name", placeholder="e.g., Interview 1")
-            transcript_text = st.text_area("Transcript Text", height=150, placeholder="Paste transcript content...")
+            event_name = st.text_input("Event Name", placeholder="e.g., Presidential Debate #1")
+            event_transcript = st.text_area("Event Transcript", height=150, placeholder="Paste event transcript...")
         
         with col2:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("Add Transcript") and transcript_name and transcript_text:
-                st.session_state.transcripts[transcript_name] = transcript_text
-                st.success(f"Added '{transcript_name}'")
+            if st.button("Add Event") and event_name and event_transcript:
+                st.session_state.transcripts[event_name] = event_transcript
+                st.success(f"Added '{event_name}'")
                 st.rerun()
             
-            if st.button("Clear All") and st.session_state.transcripts:
+            if st.button("Clear All Events") and st.session_state.transcripts:
                 st.session_state.transcripts = {}
-                st.success("Cleared all transcripts")
+                st.success("Cleared all events")
                 st.rerun()
         
-        # Show current transcripts
+        # Show current events
         if st.session_state.transcripts:
-            st.subheader("📋 Current Transcripts")
-            transcript_df = pd.DataFrame([
+            st.subheader("📋 Current Events")
+            events_df = pd.DataFrame([
                 {
-                    'Name': name,
+                    'Event': name,
                     'Characters': len(content),
                     'Words': len(content.split()),
                     'Preview': content[:100] + '...' if len(content) > 100 else content
                 }
                 for name, content in st.session_state.transcripts.items()
             ])
-            st.dataframe(transcript_df, use_container_width=True)
+            st.dataframe(events_df, use_container_width=True)
         
-        # Keywords input
-        keywords = st.text_input(
-            "Keywords to analyze (comma-separated)",
-            placeholder="keyword1, keyword2, keyword3",
-            value=st.session_state.keywords,
-            help="Enter keywords you want to search for across all transcripts"
+        # Terms input
+        market_terms = st.text_input(
+            "Market terms to analyze (comma-separated)",
+            placeholder="term1, term2, term3",
+            value=st.session_state.market_terms,
+            help="Enter the exact terms from your prediction markets"
         )
-        st.session_state.keywords = keywords
+        st.session_state.market_terms = market_terms
     
     # Analysis section
-    if st.session_state.transcripts and st.session_state.keywords:
-        st.header("🔍 Analysis Results")
+    if st.session_state.transcripts and st.session_state.market_terms:
+        st.header("🔍 Market Resolution Analysis")
         
-        # Process transcripts
-        all_results = process_multiple_transcripts(
+        # Process transcripts with market rules
+        all_results = process_multiple_transcripts_market(
             st.session_state.transcripts,
-            st.session_state.keywords,
+            st.session_state.market_terms,
             case_sensitive,
-            whole_words
+            include_plurals,
+            include_compounds
         )
         
-        if analysis_mode == "Single Transcript":
-            # Single transcript analysis (original functionality)
-            transcript_name = list(all_results.keys())[0]
-            results = all_results[transcript_name]['results']
+        if analysis_mode == "Single Event":
+            # Single event analysis
+            event_name = list(all_results.keys())[0]
+            event_data = all_results[event_name]
+            results = event_data['results']
             
-            if results:
-                # Summary metrics
-                total_keywords = sum(r['count'] for r in results)
-                unique_keywords = len([r for r in results if r['count'] > 0])
+            # Market Resolution Summary
+            st.subheader("🎯 Market Resolution")
+            overall_resolution = 'YES' if event_data['market_resolution'] else 'NO'
+            
+            if overall_resolution == 'YES':
+                st.success(f"**MARKET RESOLVES: {overall_resolution}** ✅")
+            else:
+                st.error(f"**MARKET RESOLVES: {overall_resolution}** ❌")
+            
+            # Individual term results
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Matches", event_data['total_keywords'])
+            with col2:
+                resolving_terms = sum(1 for r in results if r['market_resolution'] == 'YES')
+                st.metric("Terms Found", resolving_terms)
+            with col3:
+                st.metric("Terms Searched", len(results))
+            
+            # Detailed results table
+            st.subheader("📊 Detailed Analysis")
+            
+            detailed_results = []
+            for result in results:
+                match_types = result['match_types']
+                detailed_results.append({
+                    'Term': result['keyword'],
+                    'Market Resolution': result['market_resolution'],
+                    'Total Matches': result['count'],
+                    'Exact': len(match_types['exact']),
+                    'Plural/Possessive': len(match_types['plural']) + len(match_types['possessive']),
+                    'Compound Words': len(match_types['compound']),
+                    'Density (per 1000 words)': result['density']
+                })
+            
+            detailed_df = pd.DataFrame(detailed_results)
+            st.dataframe(detailed_df, use_container_width=True)
+            
+            # Visualizations for single event
+            if sum(detailed_df['Total Matches']) > 0:
+                st.subheader("📊 Match Type Breakdown")
                 
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total Occurrences", total_keywords)
-                with col2:
-                    st.metric("Keywords Found", unique_keywords)
-                with col3:
-                    st.metric("Keywords Searched", len(results))
+                # Create breakdown chart
+                fig_breakdown = go.Figure()
                 
-                # Results table
-                df_results = pd.DataFrame([
-                    {
-                        'Keyword': r['keyword'],
-                        'Count': r['count'],
-                        'Percentage': f"{r['percentage']}%",
-                        'Density (per 1000 words)': r['density']
-                    } for r in results
-                ])
+                categories = ['Exact', 'Plural/Possessive', 'Compound Words']
+                colors = ['#FFB6C1', '#98FB98', '#DDA0DD']
                 
-                st.dataframe(df_results, use_container_width=True)
+                for i, category in enumerate(categories):
+                    fig_breakdown.add_trace(go.Bar(
+                        name=category,
+                        x=detailed_df['Term'],
+                        y=detailed_df[category],
+                        marker_color=colors[i],
+                        text=detailed_df[category],
+                        textposition='auto'
+                    ))
                 
-                # Visualizations
-                st.subheader("📊 Visualizations")
+                fig_breakdown.update_layout(
+                    title='Match Types by Term',
+                    xaxis_title='Terms',
+                    yaxis_title='Number of Matches',
+                    barmode='stack',
+                    height=400
+                )
                 
-                col1, col2 = st.columns(2)
-                with col1:
-                    fig_bar = px.bar(
-                        df_results, 
-                        x='Keyword', 
-                        y='Count',
-                        title='Keyword Frequencies',
-                        text='Count'
-                    )
-                    fig_bar.update_traces(textposition='outside')
-                    st.plotly_chart(fig_bar, use_container_width=True)
+                st.plotly_chart(fig_breakdown, use_container_width=True)
+            
+            # Highlighted transcript
+            st.subheader("🎯 Highlighted Transcript")
+            show_highlight = st.checkbox("Show highlighted text", value=True)
+            
+            if show_highlight and results:
+                # Add legend for highlight colors
+                st.markdown("""
+                **Highlight Legend:**  
+                🟣 **Exact matches** • 🟢 **Plurals** • 🔵 **Possessives** • 🟪 **Compounds**
+                """)
                 
-                with col2:
-                    if sum(df_results['Count']) > 0:
-                        fig_pie = px.pie(
-                            df_results[df_results['Count'] > 0],
-                            values='Count',
-                            names='Keyword',
-                            title='Keyword Distribution'
-                        )
-                        st.plotly_chart(fig_pie, use_container_width=True)
+                transcript_text = list(st.session_state.transcripts.values())[0]
+                highlighted = highlight_text_with_types(transcript_text, results)
                 
-                # Highlighted text
-                if st.checkbox("Show Highlighted Transcript", value=True):
-                    transcript_text = list(st.session_state.transcripts.values())[0]
-                    highlighted = highlight_text(transcript_text, results)
-                    
-                    st.markdown(
-                        f'<div style="max-height: 400px; overflow-y: auto; padding: 10px; background-color: #f8f9fa; border-radius: 5px;">{highlighted}</div>',
-                        unsafe_allow_html=True
-                    )
+                st.markdown(
+                    f'<div style="max-height: 500px; overflow-y: auto; padding: 15px; background-color: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">{highlighted}</div>',
+                    unsafe_allow_html=True
+                )
         
         else:
-            # Multiple transcripts comparison
-            comparison_df = create_comparison_dataframe(all_results, st.session_state.keywords)
+            # Multiple events comparison
+            comparison_df = create_market_comparison_dataframe(all_results, st.session_state.market_terms)
+            market_summary_df = create_market_resolution_summary(all_results)
             
-            # Summary metrics
+            # Overall market summary
+            st.subheader("🎯 Market Resolution Summary")
+            
+            yes_count = market_summary_df['Market Resolution'].value_counts().get('YES', 0)
+            no_count = market_summary_df['Market Resolution'].value_counts().get('NO', 0)
+            
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Total Transcripts", len(all_results))
+                st.metric("Total Events", len(all_results))
             with col2:
-                total_words = sum(data['word_count'] for data in all_results.values())
-                st.metric("Total Words", f"{total_words:,}")
+                st.metric("Resolving YES", yes_count, delta=None)
             with col3:
-                total_keyword_instances = sum(data['total_keywords'] for data in all_results.values())
-                st.metric("Total Keyword Instances", total_keyword_instances)
+                st.metric("Resolving NO", no_count, delta=None)
             with col4:
-                avg_density = comparison_df['Keyword Density'].mean() if 'Keyword Density' in comparison_df.columns else 0
-                st.metric("Avg Keyword Density", f"{avg_density:.2f}")
+                success_rate = (yes_count / len(all_results)) * 100 if all_results else 0
+                st.metric("Success Rate", f"{success_rate:.1f}%")
             
-            # Comparison table
-            st.subheader("📋 Comparison Table")
-            st.dataframe(comparison_df, use_container_width=True)
+            # Market resolution summary table
+            st.dataframe(market_summary_df, use_container_width=True)
             
-            # Download comparison data
-            csv_data = export_comparison_to_csv(comparison_df)
+            # Export functionality
+            export_data = export_market_results(comparison_df, all_results)
             st.download_button(
-                label="📥 Download Comparison CSV",
-                data=csv_data,
-                file_name="transcript_comparison.csv",
+                label="📥 Download Complete Analysis",
+                data=export_data['Detailed_Analysis'],
+                file_name="market_resolution_analysis.csv",
                 mime="text/csv"
             )
             
-            # Comparison charts
-            st.subheader("📊 Comparison Visualizations")
-            charts = create_comparison_charts(comparison_df, st.session_state.keywords)
+            # Visualizations
+            st.subheader("📊 Market Resolution Visualizations")
             
-            if 'counts' in charts:
-                st.plotly_chart(charts['counts'], use_container_width=True)
+            # Resolution summary chart
+            resolution_summary_fig = create_resolution_summary_chart(all_results)
+            st.plotly_chart(resolution_summary_fig, use_container_width=True)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                if 'heatmap' in charts:
-                    st.plotly_chart(charts['heatmap'], use_container_width=True)
-                if 'overall_density' in charts:
-                    st.plotly_chart(charts['overall_density'], use_container_width=True)
+            # Resolution heatmap
+            resolution_heatmap = create_market_resolution_chart(comparison_df, st.session_state.market_terms)
+            if resolution_heatmap:
+                st.plotly_chart(resolution_heatmap, use_container_width=True)
             
-            with col2:
-                if 'word_count' in charts:
-                    st.plotly_chart(charts['word_count'], use_container_width=True)
+            # Match type breakdown
+            match_breakdown_fig = create_match_type_breakdown_chart(comparison_df, st.session_state.market_terms)
+            if match_breakdown_fig:
+                st.plotly_chart(match_breakdown_fig, use_container_width=True)
             
-            # Individual transcript details
-            st.subheader("🔍 Individual Transcript Details")
-            selected_transcript = st.selectbox(
-                "Select transcript to view details:",
+            # Individual event details
+            st.subheader("🔍 Individual Event Analysis")
+            selected_event = st.selectbox(
+                "Select event to analyze:",
                 list(st.session_state.transcripts.keys())
             )
             
-            if selected_transcript:
-                results = all_results[selected_transcript]['results']
+            if selected_event:
+                event_results = all_results[selected_event]['results']
+                event_resolution = 'YES' if all_results[selected_event]['market_resolution'] else 'NO'
                 
-                # Individual results table
-                df_individual = pd.DataFrame([
-                    {
-                        'Keyword': r['keyword'],
-                        'Count': r['count'],
-                        'Percentage': f"{r['percentage']}%",
-                        'Density (per 1000 words)': r['density']
-                    } for r in results
-                ])
+                if event_resolution == 'YES':
+                    st.success(f"**{selected_event} - RESOLVES: {event_resolution}** ✅")
+                else:
+                    st.error(f"**{selected_event} - RESOLVES: {event_resolution}** ❌")
                 
-                st.dataframe(df_individual, use_container_width=True)
+                # Individual event details table
+                individual_results = []
+                for result in event_results:
+                    match_types = result['match_types']
+                    individual_results.append({
+                        'Term': result['keyword'],
+                        'Resolution': result['market_resolution'],
+                        'Total': result['count'],
+                        'Exact': len(match_types['exact']),
+                        'Plural/Poss.': len(match_types['plural']) + len(match_types['possessive']),
+                        'Compound': len(match_types['compound']),
+                        'Density': result['density']
+                    })
                 
-                # Show highlighted text for selected transcript
-                if st.checkbox(f"Show highlighted text for {selected_transcript}"):
-                    highlighted = highlight_text(st.session_state.transcripts[selected_transcript], results)
+                individual_df = pd.DataFrame(individual_results)
+                st.dataframe(individual_df, use_container_width=True)
+                
+                # Show highlighted text for selected event
+                if st.checkbox(f"Show highlighted text for {selected_event}"):
+                    st.markdown("""
+                    **Highlight Legend:**  
+                    🟣 **Exact** • 🟢 **Plurals** • 🔵 **Possessives** • 🟪 **Compounds**
+                    """)
+                    
+                    highlighted = highlight_text_with_types(st.session_state.transcripts[selected_event], event_results)
                     st.markdown(
-                        f'<div style="max-height: 400px; overflow-y: auto; padding: 10px; background-color: #f8f9fa; border-radius: 5px;">{highlighted}</div>',
+                        f'<div style="max-height: 400px; overflow-y: auto; padding: 15px; background-color: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">{highlighted}</div>',
                         unsafe_allow_html=True
                     )
     
-    elif st.session_state.keywords and not st.session_state.transcripts:
-        st.info("Please add some transcripts to analyze.")
-    elif st.session_state.transcripts and not st.session_state.keywords:
-        st.info("Please enter keywords to search for.")
+    elif st.session_state.market_terms and not st.session_state.transcripts:
+        st.info("📁 Please add event transcripts to analyze.")
+    elif st.session_state.transcripts and not st.session_state.market_terms:
+        st.info("🎯 Please enter market terms to search for.")
     else:
-        st.info("Please add transcripts and keywords to begin analysis.")
+        st.info("📝 Please add event transcripts and market terms to begin analysis.")
     
     # Footer
     st.markdown("---")
-    st.markdown("Built with ❤️ using Streamlit • Enhanced for multi-transcript comparison")
+    st.markdown("🎯 **Prediction Market Resolution Tool** • Built for accurate term detection according to market rules")
 
 if __name__ == "__main__":
     main()
